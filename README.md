@@ -280,7 +280,3 @@ Test coverage includes:
 Built with ❤️ for safer crowds and smarter venues.
 
 ---
-
-## 📜 License
-
-MIT License — see [LICENSE](LICENSE) for details.
