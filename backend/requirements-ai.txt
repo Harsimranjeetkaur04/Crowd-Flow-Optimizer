@@ -1,0 +1,5 @@
+# Optional Hugging Face forecasting stack for backend/app/ai/predictor.py.
+# The predictor falls back to linear extrapolation if these are unavailable.
+chronos-forecasting>=1.5,<2.0
+torch>=2.5
+numpy>=2.0
