@@ -18,7 +18,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Check Vercel credentials
+        id: check_vercel
+        run: |
+          if [ -z "${{ secrets.VERCEL_TOKEN }}" ]; then
+            echo "configured=false" >> $GITHUB_OUTPUT
+            echo "ℹ Vercel deployment skipped: VERCEL_TOKEN secret not configured in repo settings."
+          else
+            echo "configured=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Deploy frontend to Vercel
+        if: steps.check_vercel.outputs.configured == 'true'
         uses: vercel/action@main
         id: deploy
         with:

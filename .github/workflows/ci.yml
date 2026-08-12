@@ -67,10 +67,10 @@ jobs:
           cd frontend
           npm ci
 
-      - name: Lint with ESLint
+      - name: Lint frontend
         run: |
           cd frontend
-          npm run lint 2>/dev/null || echo "ESLint not configured; skipping"
+          npm run lint || true
         continue-on-error: true
 
       - name: Build frontend
