@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useRef } from "react";
 import { getWebSocketUrl } from "../api/client";
 import type { SimulationStreamMessage, Snapshot } from "../types";
 
@@ -18,10 +18,24 @@ export function useSimulationSocket({
   const [connected, setConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState<SimulationStreamMessage | null>(null);
 
-  const connect = useCallback(() => {
+  const onSnapshotRef = useRef(onSnapshot);
+  const onCompletedRef = useRef(onCompleted);
+  const onErrorRef = useRef(onError);
+
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshot;
+    onCompletedRef.current = onCompleted;
+    onErrorRef.current = onError;
+  }, [onSnapshot, onCompleted, onError]);
+
+  useEffect(() => {
+    if (!simulationId) return;
+
+    let ws: WebSocket | null = null;
+
     try {
       const wsUrl = getWebSocketUrl(simulationId);
-      const ws = new WebSocket(wsUrl);
+      ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
         setConnected(true);
@@ -33,43 +47,34 @@ export function useSimulationSocket({
           setLastMessage(message);
 
           if (message.status === "streaming" && message.snapshot) {
-            onSnapshot?.(message.snapshot, message.timestep ?? 0);
+            onSnapshotRef.current?.(message.snapshot, message.timestep ?? 0);
           } else if (message.status === "completed") {
-            onCompleted?.();
-            ws.close();
+            onCompletedRef.current?.();
+            ws?.close();
           }
         } catch (err) {
-          onError?.(`Failed to parse message: ${err}`);
+          onErrorRef.current?.(`Failed to parse message: ${err}`);
         }
       };
 
       ws.onerror = () => {
-        onError?.("WebSocket connection error");
+        onErrorRef.current?.("WebSocket connection error");
         setConnected(false);
       };
 
       ws.onclose = () => {
         setConnected(false);
       };
-
-      return ws;
     } catch (err) {
-      onError?.(`Failed to connect: ${err}`);
-      return null;
+      onErrorRef.current?.(`Failed to connect: ${err}`);
     }
-  }, [simulationId, onSnapshot, onCompleted, onError]);
 
-  useEffect(() => {
-    // Only connect when we have a real simulation ID
-    if (!simulationId) return;
-
-    const ws = connect();
     return () => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.close();
       }
     };
-  }, [connect, simulationId]);
+  }, [simulationId]);
 
   return { connected, lastMessage };
 }

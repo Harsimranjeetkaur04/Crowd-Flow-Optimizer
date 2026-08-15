@@ -12,15 +12,44 @@ const TYPE_META: Record<string, { color: string; glow: string; label: string }> 
 interface LayoutEditorProps {
   layout: VenueLayout;
   onLayoutChange: (layout: VenueLayout) => void;
+  onSaveLayout?: () => Promise<void>;
 }
 
-export function LayoutEditor({ layout, onLayoutChange }: LayoutEditorProps) {
+export function LayoutEditor({ layout, onLayoutChange, onSaveLayout }: LayoutEditorProps) {
   const [nodeType, setNodeType] = useState<
     "gate" | "walkway" | "concession" | "exit"
   >("gate");
   const [connectingFrom, setConnectingFrom] = useState<string | null>(null);
   const [dragState, setDragState] = useState<{ id: string; moved: boolean; startX: number; startY: number } | null>(null);
+  const [isCopied, setIsCopied] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
   const svgRef = useRef<SVGSVGElement>(null);
+
+  const handleCopyJson = async () => {
+    try {
+      const json = JSON.stringify(layout, null, 2);
+      await navigator.clipboard.writeText(json);
+      setIsCopied(true);
+      setTimeout(() => setIsCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy:", err);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!onSaveLayout) return;
+    setIsSaving(true);
+    try {
+      await onSaveLayout();
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2500);
+    } catch (err) {
+      console.error("Save layout failed:", err);
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   const bounds = { width: 500, height: 380 };
 
@@ -431,21 +460,44 @@ export function LayoutEditor({ layout, onLayoutChange }: LayoutEditorProps) {
         </div>
 
         {/* Bottom bar */}
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => {
-              const json = JSON.stringify(layout, null, 2);
-              navigator.clipboard.writeText(json);
-            }}
-            className="text-xs px-3 py-1.5 rounded-lg font-medium transition-all duration-200 flex items-center gap-1.5"
-            style={{
-              background: "rgba(59,130,246,0.08)",
-              border: "1px solid rgba(59,130,246,0.25)",
-              color: "#60a5fa",
-            }}
-          >
-            📋 Copy Layout as JSON
-          </button>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleCopyJson}
+              className="text-xs px-3 py-1.5 rounded-lg font-medium transition-all duration-200 flex items-center gap-1.5"
+              style={{
+                background: isCopied ? "rgba(16,185,129,0.15)" : "rgba(59,130,246,0.08)",
+                border: `1px solid ${isCopied ? "rgba(16,185,129,0.4)" : "rgba(59,130,246,0.25)"}`,
+                color: isCopied ? "#34d399" : "#60a5fa",
+              }}
+            >
+              {isCopied ? "✓ Copied to Clipboard!" : "📋 Copy Layout as JSON"}
+            </button>
+
+            {onSaveLayout && (
+              <button
+                onClick={handleSave}
+                disabled={isSaving || !layout.nodes.length}
+                className="text-xs px-3 py-1.5 rounded-lg font-semibold transition-all duration-200 flex items-center gap-1.5"
+                style={{
+                  background: saveSuccess
+                    ? "rgba(16,185,129,0.2)"
+                    : isSaving
+                    ? "rgba(30,58,95,0.4)"
+                    : "linear-gradient(135deg, rgba(37,99,235,0.2), rgba(8,145,178,0.2))",
+                  border: `1px solid ${saveSuccess ? "#10b981" : "rgba(59,130,246,0.4)"}`,
+                  color: saveSuccess ? "#34d399" : "#60a5fa",
+                  cursor: isSaving || !layout.nodes.length ? "not-allowed" : "pointer",
+                }}
+              >
+                {saveSuccess
+                  ? "✓ Layout Saved!"
+                  : isSaving
+                  ? "Saving..."
+                  : "💾 Save Venue to Server"}
+              </button>
+            )}
+          </div>
           <div
             className="text-xs font-medium"
             style={{ color: "var(--text-muted)" }}

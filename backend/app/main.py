@@ -18,7 +18,12 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 def _check_required_env_vars() -> None:
     """Check that required environment variables are set. Fail fast on startup."""
-    pass
+    jwt_secret = os.getenv("JWT_SECRET")
+    if not jwt_secret:
+        print("[WARNING] JWT_SECRET is not explicitly set in .env. Using development default.")
+    allowed_origins = os.getenv("ALLOWED_ORIGINS")
+    if not allowed_origins:
+        print("[INFO] ALLOWED_ORIGINS defaulted to http://localhost:5173.")
 
 _check_required_env_vars()
 

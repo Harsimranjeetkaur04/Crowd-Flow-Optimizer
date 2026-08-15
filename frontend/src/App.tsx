@@ -1,11 +1,18 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { ControlPanel } from "./components/ControlPanel";
 import { VenueMap } from "./components/VenueMap";
 import { LayoutEditor } from "./components/LayoutEditor";
 import { HeatmapOverlay } from "./components/HeatmapOverlay";
 import { RouteOverlay } from "./components/RouteOverlay";
 import { useSimulationSocket } from "./hooks/useSimulationSocket";
-import { runSimulation } from "./api/client";
+import {
+  runSimulation,
+  saveLayout,
+  getVenues,
+  runCounterfactual,
+  loginUser,
+  registerUser,
+} from "./api/client";
 import { DEMO_STADIUM_LAYOUT } from "./demoData";
 import type {
   VenueLayout,
@@ -67,9 +74,32 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [bottleneckSet, setBottleneckSet] = useState<Set<string>>(new Set());
   const [activeResultTab, setActiveResultTab] = useState<
-    "heatmap" | "reroutes" | "bottlenecks"
+    "heatmap" | "reroutes" | "bottlenecks" | "counterfactual"
   >("heatmap");
   const [simProgress, setSimProgress] = useState(0);
+
+  // Auth state
+  const [userToken, setUserToken] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmailInput, setAuthEmailInput] = useState("");
+  const [authPasswordInput, setAuthPasswordInput] = useState("");
+  const [authMsg, setAuthMsg] = useState<string | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
+
+  // Venues Modal state
+  const [showVenuesModal, setShowVenuesModal] = useState(false);
+  const [savedVenuesList, setSavedVenuesList] = useState<Array<{ id: string; name: string; layout: VenueLayout }>>([]);
+  const [loadingVenues, setLoadingVenues] = useState(false);
+
+  // Counterfactual state
+  const [cfResult, setCfResult] = useState<any | null>(null);
+  const [isCfRunning, setIsCfRunning] = useState(false);
+
+  // Last run params
+  const [lastCrowdSize, setLastCrowdSize] = useState(2000);
+  const [lastSchedule, setLastSchedule] = useState<EventSchedule[]>([{ time: 0, arrival_rate: 80 }]);
 
   useEffect(() => {
     if (simulationResult?.bottlenecks) {
@@ -88,20 +118,25 @@ export default function App() {
     }
   }, [isSimulationRunning, currentTimestep, simulationResult]);
 
+  const handleSocketSnapshot = useCallback((snapshot: Snapshot, timestep: number) => {
+    setCurrentSnapshot(snapshot);
+    setCurrentTimestep(timestep);
+  }, []);
+
+  const handleSocketCompleted = useCallback(() => {
+    setIsSimulationRunning(false);
+  }, []);
+
+  const handleSocketError = useCallback((msg: string) => {
+    setError(msg);
+    setIsSimulationRunning(false);
+  }, []);
+
   useSimulationSocket({
     simulationId: simulationId || "",
-    onSnapshot: (snapshot, timestep) => {
-      setCurrentSnapshot(snapshot);
-      setCurrentTimestep(timestep);
-    },
-    onCompleted: () => {
-      setIsSimulationRunning(false);
-      setView("results");
-    },
-    onError: (msg) => {
-      setError(msg);
-      setIsSimulationRunning(false);
-    },
+    onSnapshot: handleSocketSnapshot,
+    onCompleted: handleSocketCompleted,
+    onError: handleSocketError,
   });
 
   const handleRunSimulation = async (
@@ -114,6 +149,9 @@ export default function App() {
     setCurrentSnapshot(null);
     setCurrentTimestep(0);
     setSimProgress(0);
+    setCfResult(null);
+    setLastCrowdSize(crowdSize);
+    setLastSchedule(schedule);
 
     try {
       const result = await runSimulation({
@@ -124,9 +162,78 @@ export default function App() {
       });
       setSimulationResult(result);
       setSimulationId(result.simulation_id);
-    } catch (err) {
-      setError(`Failed to run simulation: ${err}`);
+    } catch (err: any) {
+      setError(err?.message ?? `Failed to run simulation: ${err}`);
       setIsSimulationRunning(false);
+    }
+  };
+
+  const handleSaveVenueLayout = async () => {
+    try {
+      await saveLayout(layout);
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to save layout to server.");
+      throw err;
+    }
+  };
+
+  const handleFetchSavedVenues = async () => {
+    setLoadingVenues(true);
+    try {
+      const venues = await getVenues();
+      setSavedVenuesList(venues);
+      setShowVenuesModal(true);
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to fetch saved venues.");
+    } finally {
+      setLoadingVenues(false);
+    }
+  };
+
+  const handleRunCounterfactual = async () => {
+    if (!simulationResult || !simulationResult.bottlenecks.length) return;
+    setIsCfRunning(true);
+    try {
+      const primaryBottleneck = simulationResult.bottlenecks[0];
+      const res = await runCounterfactual(
+        {
+          layout,
+          expected_crowd_size: lastCrowdSize,
+          event_schedule: lastSchedule,
+          duration_seconds: 20,
+        },
+        primaryBottleneck
+      );
+      setCfResult(res);
+      setActiveResultTab("counterfactual");
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to run counterfactual scenario.");
+    } finally {
+      setIsCfRunning(false);
+    }
+  };
+
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthMsg(null);
+    setAuthLoading(true);
+    try {
+      if (authMode === "login") {
+        const res = await loginUser(authEmailInput, authPasswordInput);
+        setUserToken(res.access_token);
+        setUserEmail(authEmailInput);
+        setShowAuthModal(false);
+        setAuthEmailInput("");
+        setAuthPasswordInput("");
+      } else {
+        const res = await registerUser(authEmailInput, authPasswordInput);
+        setAuthMsg(res.message ?? "Registration successful! You can now log in.");
+        setAuthMode("login");
+      }
+    } catch (err: any) {
+      setAuthMsg(err?.message ?? "Authentication failed.");
+    } finally {
+      setAuthLoading(false);
     }
   };
 
@@ -136,6 +243,7 @@ export default function App() {
     setSimulationResult(null);
     setError(null);
     setSimProgress(0);
+    setCfResult(null);
   };
 
   const rawMaxSeverity =
@@ -143,7 +251,6 @@ export default function App() {
       (m, b) => Math.max(m, b.severity),
       0
     ) ?? 0;
-  // Cap for display — backend severity can exceed 1.0 (raw density ratio)
   const maxSeverity = Math.min(rawMaxSeverity, 1.0);
 
   const riskLevel =
@@ -229,8 +336,8 @@ export default function App() {
             />
           </nav>
 
-          {/* Actions */}
-          <div className="flex items-center gap-3">
+          {/* Header Action Buttons */}
+          <div className="flex items-center gap-2">
             {simulationResult && (
               <span
                 className={`badge ${
@@ -260,19 +367,46 @@ export default function App() {
                   : "All Clear"}
               </span>
             )}
-            <button onClick={handleLoadDemo} className="btn-ghost text-sm py-2">
+
+            <button
+              onClick={handleFetchSavedVenues}
+              disabled={loadingVenues}
+              className="btn-ghost text-xs py-2 px-3 flex items-center gap-1.5"
+            >
+              📂 Saved Venues
+            </button>
+
+            <button onClick={handleLoadDemo} className="btn-ghost text-xs py-2 px-3">
               🏟 Demo Stadium
             </button>
+
+            {userToken ? (
+              <div className="flex items-center gap-2">
+                <span className="text-xs px-2.5 py-1.5 rounded-lg font-mono font-semibold" style={{ background: "rgba(59,130,246,0.1)", color: "#60a5fa" }}>
+                  👤 {userEmail}
+                </span>
+                <button
+                  onClick={() => { setUserToken(null); setUserEmail(null); }}
+                  className="text-xs text-red-400 hover:underline px-1"
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => { setShowAuthModal(true); setAuthMsg(null); }}
+                className="btn-primary text-xs py-2 px-3 flex items-center gap-1"
+              >
+                🔑 Sign In
+              </button>
+            )}
           </div>
         </div>
       </header>
 
       {/* ── Error Banner ───────────────────────────────────── */}
       {error && (
-        <div
-          className="max-w-7xl mx-auto px-6 pt-4"
-          role="alert"
-        >
+        <div className="max-w-7xl mx-auto px-6 pt-4" role="alert">
           <div
             className="flex items-center justify-between p-4 rounded-xl text-sm"
             style={{
@@ -282,7 +416,7 @@ export default function App() {
             }}
           >
             <span>
-              <strong>⚠ Error:</strong> {error}
+              <strong>⚠ Alert:</strong> {error}
             </span>
             <button
               onClick={() => setError(null)}
@@ -325,7 +459,11 @@ export default function App() {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               {/* Editor */}
               <div className="lg:col-span-2">
-                <LayoutEditor layout={layout} onLayoutChange={setLayout} />
+                <LayoutEditor
+                  layout={layout}
+                  onLayoutChange={setLayout}
+                  onSaveLayout={handleSaveVenueLayout}
+                />
               </div>
 
               {/* Control Panel */}
@@ -394,9 +532,13 @@ export default function App() {
                 <button
                   onClick={() => setView("results")}
                   className="btn-primary"
-                  disabled={!simulationResult}
+                  disabled={isSimulationRunning || !simulationResult}
+                  style={{
+                    opacity: isSimulationRunning || !simulationResult ? 0.5 : 1,
+                    cursor: isSimulationRunning || !simulationResult ? "not-allowed" : "pointer",
+                  }}
                 >
-                  View Results →
+                  {isSimulationRunning ? "Simulating Frames..." : "View Results →"}
                 </button>
               </div>
 
@@ -514,10 +656,7 @@ export default function App() {
                   className="metric-card"
                   style={{ "--accent-color": kpi.accent } as React.CSSProperties}
                 >
-                  <div
-                    className="text-2xl mb-2"
-                    style={{ lineHeight: 1 }}
-                  >
+                  <div className="text-2xl mb-2" style={{ lineHeight: 1 }}>
                     {kpi.icon}
                   </div>
                   <div
@@ -565,8 +704,7 @@ export default function App() {
                   <div
                     className="font-bold"
                     style={{
-                      color:
-                        riskLevel === "critical" ? "#f87171" : "#fbbf24",
+                      color: riskLevel === "critical" ? "#f87171" : "#fbbf24",
                     }}
                   >
                     {riskLevel === "critical"
@@ -592,10 +730,7 @@ export default function App() {
                 className="px-5 py-4 flex items-center justify-between"
                 style={{ borderBottom: "1px solid rgba(30,58,95,0.5)" }}
               >
-                <h3
-                  className="font-semibold"
-                  style={{ color: "var(--text-primary)" }}
-                >
+                <h3 className="font-semibold" style={{ color: "var(--text-primary)" }}>
                   Simulation Analysis
                 </h3>
                 <div className="tab-nav">
@@ -608,9 +743,7 @@ export default function App() {
                   ).map((t) => (
                     <button
                       key={t.id}
-                      className={`tab-btn ${
-                        activeResultTab === t.id ? "active" : ""
-                      }`}
+                      className={`tab-btn ${activeResultTab === t.id ? "active" : ""}`}
                       onClick={() => setActiveResultTab(t.id)}
                     >
                       {t.label}
@@ -643,146 +776,49 @@ export default function App() {
 
               {/* Reroutes Tab */}
               {activeResultTab === "reroutes" && (
-                <div
-                  className="p-5 space-y-4"
-                  style={{ maxHeight: "460px", overflowY: "auto" }}
-                >
+                <div className="p-5 space-y-4" style={{ maxHeight: "460px", overflowY: "auto" }}>
                   {simulationResult.reroutes.length === 0 ? (
-                    <div
-                      className="flex flex-col items-center justify-center py-16 gap-3"
-                      style={{ color: "var(--text-muted)" }}
-                    >
+                    <div className="flex flex-col items-center justify-center py-16 gap-3" style={{ color: "var(--text-muted)" }}>
                       <span className="text-5xl">✅</span>
-                      <p className="font-semibold">
-                        No reroutes needed — crowd flow is optimal
-                      </p>
+                      <p className="font-semibold">No reroutes needed — crowd flow is optimal</p>
                     </div>
                   ) : (
                     simulationResult.reroutes.map((reroute, idx) => {
                       const savedPct =
                         reroute.congested_baseline_time > 0
-                          ? (
-                              (reroute.estimated_time_saved /
-                                reroute.congested_baseline_time) *
-                              100
-                            ).toFixed(0)
+                          ? ((reroute.estimated_time_saved / reroute.congested_baseline_time) * 100).toFixed(0)
                           : "0";
 
                       return (
-                        <div
-                          key={idx}
-                          className="glass-card-hover rounded-2xl p-5"
-                          style={{
-                            background: "rgba(5,10,20,0.6)",
-                            border: "1px solid rgba(30,58,95,0.6)",
-                          }}
-                        >
+                        <div key={idx} className="glass-card-hover rounded-2xl p-5" style={{ background: "rgba(5,10,20,0.6)", border: "1px solid rgba(30,58,95,0.6)" }}>
                           <div className="flex items-start justify-between mb-3">
                             <div>
-                              <div
-                                className="font-bold text-base"
-                                style={{ color: "var(--text-primary)" }}
-                              >
+                              <div className="font-bold text-base" style={{ color: "var(--text-primary)" }}>
                                 {reroute.gate_id}
-                                <span
-                                  className="mx-2 font-normal"
-                                  style={{ color: "var(--text-muted)" }}
-                                >
-                                  →
-                                </span>
+                                <span className="mx-2 font-normal" style={{ color: "var(--text-muted)" }}>→</span>
                                 {reroute.destination_id}
                               </div>
-                              <div
-                                className="text-xs mt-1"
-                                style={{ color: "var(--text-secondary)" }}
-                              >
-                                Avoids{" "}
-                                <span className="badge badge-red" style={{ fontSize: "10px" }}>
-                                  {reroute.avoids}
-                                </span>
+                              <div className="text-xs mt-1" style={{ color: "var(--text-secondary)" }}>
+                                Avoids <span className="badge badge-red" style={{ fontSize: "10px" }}>{reroute.avoids}</span>
                               </div>
                             </div>
                             <div className="text-right">
-                              <div
-                                className="text-2xl font-extrabold"
-                                style={{ color: "#34d399", letterSpacing: "-0.02em" }}
-                              >
+                              <div className="text-2xl font-extrabold" style={{ color: "#34d399", letterSpacing: "-0.02em" }}>
                                 -{savedPct}%
                               </div>
-                              <div
-                                className="text-xs"
-                                style={{ color: "var(--text-muted)" }}
-                              >
-                                time saved
-                              </div>
+                              <div className="text-xs" style={{ color: "var(--text-muted)" }}>time saved</div>
                             </div>
                           </div>
 
-                          {/* Path */}
                           <div className="flex flex-wrap items-center gap-2">
                             {reroute.path.map((step, i) => (
                               <span key={i} className="flex items-center gap-2">
-                                <span
-                                  className="px-2.5 py-1 rounded-lg text-xs font-mono font-semibold"
-                                  style={{
-                                    background: "rgba(59,130,246,0.12)",
-                                    color: "#60a5fa",
-                                    border: "1px solid rgba(59,130,246,0.2)",
-                                  }}
-                                >
+                                <span className="px-2.5 py-1 rounded-lg text-xs font-mono font-semibold" style={{ background: "rgba(59,130,246,0.12)", color: "#60a5fa", border: "1px solid rgba(59,130,246,0.2)" }}>
                                   {step}
                                 </span>
-                                {i < reroute.path.length - 1 && (
-                                  <span
-                                    style={{ color: "var(--text-muted)" }}
-                                  >
-                                    →
-                                  </span>
-                                )}
+                                {i < reroute.path.length - 1 && <span style={{ color: "var(--text-muted)" }}>→</span>}
                               </span>
                             ))}
-                          </div>
-
-                          {/* Timing comparison */}
-                          <div
-                            className="mt-3 grid grid-cols-3 gap-3 text-center text-xs rounded-xl p-3"
-                            style={{ background: "rgba(5,10,20,0.5)" }}
-                          >
-                            <div>
-                              <div
-                                style={{ color: "var(--text-muted)" }}
-                              >
-                                Baseline
-                              </div>
-                              <div
-                                className="font-bold"
-                                style={{ color: "var(--text-secondary)" }}
-                              >
-                                {reroute.baseline_time.toFixed(1)}s
-                              </div>
-                            </div>
-                            <div>
-                              <div style={{ color: "var(--text-muted)" }}>
-                                Congested
-                              </div>
-                              <div
-                                className="font-bold"
-                                style={{ color: "#f87171" }}
-                              >
-                                {reroute.congested_baseline_time.toFixed(1)}s
-                              </div>
-                            </div>
-                            <div>
-                              <div style={{ color: "var(--text-muted)" }}>
-                                Rerouted
-                              </div>
-                              <div
-                                className="font-bold"
-                                style={{ color: "#34d399" }}
-                              >
-                                {reroute.estimated_time.toFixed(1)}s
-                              </div>
-                            </div>
                           </div>
                         </div>
                       );
@@ -793,79 +829,31 @@ export default function App() {
 
               {/* Bottlenecks Tab */}
               {activeResultTab === "bottlenecks" && (
-                <div
-                  className="p-5 space-y-3"
-                  style={{ maxHeight: "460px", overflowY: "auto" }}
-                >
+                <div className="p-5 space-y-3" style={{ maxHeight: "460px", overflowY: "auto" }}>
                   {simulationResult.bottlenecks.length === 0 ? (
-                    <div
-                      className="flex flex-col items-center justify-center py-16 gap-3"
-                      style={{ color: "var(--text-muted)" }}
-                    >
+                    <div className="flex flex-col items-center justify-center py-16 gap-3" style={{ color: "var(--text-muted)" }}>
                       <span className="text-5xl">✅</span>
                       <p className="font-semibold">No bottlenecks detected</p>
                     </div>
                   ) : (
                     simulationResult.bottlenecks.map((bn, idx) => {
                       const sevPct = Math.min(100, Math.round(bn.severity * 100));
-                      const sevColor =
-                        bn.severity > 0.8
-                          ? "#ef4444"
-                          : bn.severity > 0.5
-                          ? "#f59e0b"
-                          : "#10b981";
+                      const sevColor = bn.severity > 0.8 ? "#ef4444" : bn.severity > 0.5 ? "#f59e0b" : "#10b981";
 
                       return (
-                        <div
-                          key={idx}
-                          className="flex items-center gap-4 p-4 rounded-xl"
-                          style={{
-                            background: "rgba(5,10,20,0.6)",
-                            border: "1px solid rgba(30,58,95,0.5)",
-                          }}
-                        >
-                          <span
-                            className={`badge ${
-                              bn.kind === "node" ? "badge-blue" : "badge-purple"
-                            }`}
-                            style={{ minWidth: 60 }}
-                          >
+                        <div key={idx} className="flex items-center gap-4 p-4 rounded-xl" style={{ background: "rgba(5,10,20,0.6)", border: "1px solid rgba(30,58,95,0.5)" }}>
+                          <span className={`badge ${bn.kind === "node" ? "badge-blue" : "badge-purple"}`} style={{ minWidth: 60 }}>
                             {bn.kind}
                           </span>
                           <div className="flex-1 min-w-0">
-                            <div
-                              className="font-semibold text-sm truncate"
-                              style={{ color: "var(--text-primary)" }}
-                            >
-                              {bn.id}
-                            </div>
-                            <div
-                              className="text-xs mt-0.5"
-                              style={{ color: "var(--text-muted)" }}
-                            >
-                              @ {bn.timestep}s
-                            </div>
+                            <div className="font-semibold text-sm truncate" style={{ color: "var(--text-primary)" }}>{bn.id}</div>
+                            <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>@ {bn.timestep}s</div>
                           </div>
-                          <div
-                            className="flex items-center gap-3"
-                            style={{ minWidth: 140 }}
-                          >
+                          <div className="flex items-center gap-3" style={{ minWidth: 140 }}>
                             <div className="severity-bar flex-1">
-                              <div
-                                className="severity-fill"
-                                style={{
-                                  width: `${Math.min(100, sevPct)}%`,
-                                  background: sevColor,
-                                  boxShadow: `0 0 6px ${sevColor}`,
-                                }}
-                              />
+                              <div className="severity-fill" style={{ width: `${Math.min(100, sevPct)}%`, background: sevColor, boxShadow: `0 0 6px ${sevColor}` }} />
                             </div>
-                            <span
-                              className="text-xs font-bold font-mono w-8 text-right"
-                              style={{ color: sevColor }}
-                            >
-                              {sevPct}%
-                            </span>
+                            <span className="text-xs font-bold font-mono w-8 text-right" style={{ color: sevColor }}>{sevPct}%</span>
                           </div>
                         </div>
                       );
@@ -873,95 +861,118 @@ export default function App() {
                   )}
                 </div>
               )}
+
             </div>
 
             {/* Route Overlay Card */}
             {simulationResult.reroutes.length > 0 && (
               <div className="glass-card overflow-hidden">
-                <div
-                  className="px-5 py-4 flex items-center gap-3"
-                  style={{ borderBottom: "1px solid rgba(30,58,95,0.5)" }}
-                >
+                <div className="px-5 py-4 flex items-center gap-3" style={{ borderBottom: "1px solid rgba(30,58,95,0.5)" }}>
                   <span className="text-lg">🗺️</span>
-                  <h3
-                    className="font-semibold"
-                    style={{ color: "var(--text-primary)" }}
-                  >
-                    Recommended Routes Overlay
-                  </h3>
-                  <span className="badge badge-green ml-auto">
-                    {simulationResult.reroutes.length} active routes
-                  </span>
+                  <h3 className="font-semibold" style={{ color: "var(--text-primary)" }}>Recommended Routes Overlay</h3>
+                  <span className="badge badge-green ml-auto">{simulationResult.reroutes.length} active routes</span>
                 </div>
-                <div style={{ padding: "16px", height: "360px" }}>
-                  <RouteOverlay
-                    layout={layout}
-                    reroutes={simulationResult.reroutes}
-                    animate={true}
-                  />
+                <div style={{ padding: "16px", height: "520px" }}>
+                  <RouteOverlay layout={layout} reroutes={simulationResult.reroutes} animate={true} />
                 </div>
               </div>
             )}
 
             {/* Action buttons */}
             <div className="flex gap-3">
-              <button
-                onClick={() => setView("layout")}
-                className="btn-ghost flex-1"
-              >
-                ✏️ Edit Layout
-              </button>
-              <button
-                onClick={() => {
-                  setSimulationResult(null);
-                  setView("layout");
-                  setSimProgress(0);
-                }}
-                className="btn-success flex-1"
-              >
-                🔄 New Simulation
-              </button>
+              <button onClick={() => setView("layout")} className="btn-ghost flex-1">✏️ Edit Layout</button>
+              <button onClick={() => { setSimulationResult(null); setView("layout"); setSimProgress(0); }} className="btn-success flex-1">🔄 New Simulation</button>
             </div>
-          </div>
-        )}
-
-        {/* No results yet on results tab */}
-        {view === "results" && !simulationResult && (
-          <div
-            className="flex flex-col items-center justify-center py-32 gap-6"
-            style={{ color: "var(--text-muted)" }}
-          >
-            <span className="text-7xl">📊</span>
-            <div className="text-center">
-              <p className="text-xl font-bold" style={{ color: "var(--text-secondary)" }}>
-                No simulation results yet
-              </p>
-              <p className="text-sm mt-2">
-                Configure your venue layout and run a simulation to see results
-              </p>
-            </div>
-            <button
-              onClick={() => setView("layout")}
-              className="btn-primary"
-            >
-              Go to Layout →
-            </button>
           </div>
         )}
       </main>
 
+      {/* ── Saved Venues Modal ───────────────────────────────────── */}
+      {showVenuesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}>
+          <div className="glass-card max-w-lg w-full p-6 space-y-4 rounded-2xl" style={{ background: "rgba(12,21,36,0.95)", border: "1px solid rgba(30,58,95,0.8)" }}>
+            <div className="flex items-center justify-between pb-3" style={{ borderBottom: "1px solid rgba(30,58,95,0.5)" }}>
+              <h3 className="font-bold text-lg text-white">📂 Saved Venues</h3>
+              <button onClick={() => setShowVenuesModal(false)} className="text-slate-400 hover:text-white">✕</button>
+            </div>
+
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {savedVenuesList.length === 0 ? (
+                <p className="text-xs text-slate-400 py-6 text-center">No saved venues found in server database. Save your current venue from the editor!</p>
+              ) : (
+                savedVenuesList.map((v) => (
+                  <div key={v.id} className="p-3 rounded-xl flex items-center justify-between border transition-all hover:bg-blue-600/10 cursor-pointer" style={{ background: "rgba(5,10,20,0.6)", borderColor: "rgba(30,58,95,0.5)" }} onClick={() => { setLayout(v.layout); setShowVenuesModal(false); setView("layout"); }}>
+                    <div>
+                      <div className="font-bold text-sm text-blue-400">{v.name}</div>
+                      <div className="text-xs text-slate-400">{v.layout?.nodes?.length ?? 0} nodes · {v.layout?.edges?.length ?? 0} corridors</div>
+                    </div>
+                    <span className="btn-primary text-xs py-1 px-3">Load Layout</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Auth Modal ───────────────────────────────────────────── */}
+      {showAuthModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}>
+          <div className="glass-card max-w-md w-full p-6 space-y-4 rounded-2xl" style={{ background: "rgba(12,21,36,0.95)", border: "1px solid rgba(30,58,95,0.8)" }}>
+            <div className="flex items-center justify-between pb-3" style={{ borderBottom: "1px solid rgba(30,58,95,0.5)" }}>
+              <h3 className="font-bold text-lg text-white">{authMode === "login" ? "🔑 User Login" : "📝 Create Account"}</h3>
+              <button onClick={() => setShowAuthModal(false)} className="text-slate-400 hover:text-white">✕</button>
+            </div>
+
+            {authMsg && (
+              <div className="p-3 rounded-lg text-xs" style={{ background: "rgba(59,130,246,0.1)", border: "1px solid rgba(59,130,246,0.3)", color: "#60a5fa" }}>
+                {authMsg}
+              </div>
+            )}
+
+            <form onSubmit={handleAuthSubmit} className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold text-slate-400 uppercase">Email Address</label>
+                <input
+                  type="email"
+                  required
+                  value={authEmailInput}
+                  onChange={(e) => setAuthEmailInput(e.target.value)}
+                  className="input-field mt-1"
+                  placeholder="user@example.com"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold text-slate-400 uppercase">Password</label>
+                <input
+                  type="password"
+                  required
+                  value={authPasswordInput}
+                  onChange={(e) => setAuthPasswordInput(e.target.value)}
+                  className="input-field mt-1"
+                  placeholder="••••••••"
+                />
+              </div>
+
+              <button type="submit" disabled={authLoading} className="btn-primary w-full py-2.5 font-bold text-sm mt-2">
+                {authLoading ? "Processing..." : authMode === "login" ? "Sign In" : "Register Account"}
+              </button>
+            </form>
+
+            <div className="text-center pt-2 text-xs text-slate-400">
+              {authMode === "login" ? (
+                <span>Don't have an account? <button onClick={() => { setAuthMode("register"); setAuthMsg(null); }} className="text-blue-400 underline font-semibold">Register here</button></span>
+              ) : (
+                <span>Already registered? <button onClick={() => { setAuthMode("login"); setAuthMsg(null); }} className="text-blue-400 underline font-semibold">Sign in here</button></span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Footer ─────────────────────────────────────────── */}
-      <footer
-        className="mt-16 py-6 text-center text-xs"
-        style={{
-          borderTop: "1px solid rgba(30,58,95,0.4)",
-          color: "var(--text-muted)",
-        }}
-      >
-        <p>
-          🏟️ CrowdFlow AI — Crowd Safety Intelligence Platform &nbsp;·&nbsp;
-          Built with React + FastAPI + AI
-        </p>
+      <footer className="mt-16 py-6 text-center text-xs" style={{ borderTop: "1px solid rgba(30,58,95,0.4)", color: "var(--text-muted)" }}>
+        <p>🏟️ CrowdFlow AI — Crowd Safety Intelligence Platform &nbsp;·&nbsp; Built with React + FastAPI + AI</p>
       </footer>
     </div>
   );
