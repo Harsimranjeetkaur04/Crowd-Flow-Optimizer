@@ -554,7 +554,7 @@ export default function App() {
                   className="h-full rounded-full transition-all duration-500"
                   style={{
                     width: `${simProgress}%`,
-                    background: isSimulationRunning
+                    backgroundImage: isSimulationRunning
                       ? "linear-gradient(90deg, #1d4ed8, #2563eb, #60a5fa, #2563eb, #1d4ed8)"
                       : "linear-gradient(90deg, #059669, #10b981)",
                     backgroundSize: "200% 100%",
