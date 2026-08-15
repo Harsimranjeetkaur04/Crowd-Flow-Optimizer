@@ -30,7 +30,6 @@ Existing venue safety plans are **static blueprints** — they can't adapt when 
 3. **Detect** dangerous bottlenecks before they become deadly
 4. **Reroute** crowd flow in real-time using graph-based optimization
 5. **Predict** future congestion risk using a trained ML model
-
 ---
 
 ## ✨ Features
